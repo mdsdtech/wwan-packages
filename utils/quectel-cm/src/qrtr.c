@@ -1,19 +1,14 @@
-//https://github.com/andersson/qrtr
-/******************************************************************************
-  @file    QrtrCM.c
-  @brief   GobiNet driver.
+/*
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-  DESCRIPTION
-  Connectivity Management Tool for USB network adapter of Quectel wireless cellular modules.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
+*/
 
-  INITIALIZATION AND SEQUENCING REQUIREMENTS
-  None.
-
-  ---------------------------------------------------------------------------
-  Copyright (c) 2016 - 2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
-  Quectel Wireless Solution Proprietary and Confidential.
-  ---------------------------------------------------------------------------
-******************************************************************************/
 #include <stdio.h>
 #include <string.h>
 #include <termios.h>
@@ -268,7 +263,7 @@ static void handle_ctrl_pkt(int sock) {
 }
 #else
 #include <linux/socket.h>
-#include "qrtr.h"
+#include <linux/qrtr.h>
 #endif
 
 static int qrtr_socket(void)
@@ -296,7 +291,7 @@ static int qrtr_socket(void)
 
 static int qrtr_send(int sock, uint32_t node, uint32_t port, const void *data, unsigned int sz)
 {
-    struct sockaddr_qrtr sq = {};
+    struct sockaddr_qrtr sq;
     int rc;
 
     sq.sq_family = AF_QIPCRTR;
@@ -314,7 +309,7 @@ static int qrtr_send(int sock, uint32_t node, uint32_t port, const void *data, u
 
 static int qrtr_recv(int sock, void *data, unsigned int sz, uint32_t *node, uint32_t *port)
 {
-    struct sockaddr_qrtr sq = {};
+    struct sockaddr_qrtr sq;
     socklen_t sl = sizeof(sq);
     int rc;
 

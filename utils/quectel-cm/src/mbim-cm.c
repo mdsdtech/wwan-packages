@@ -1,18 +1,14 @@
-/******************************************************************************
-  @file    mbim-cm.c
-  @brief   MIBIM drivers.
+/*
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-  DESCRIPTION
-  Connectivity Management Tool for USB network adapter of Quectel wireless cellular modules.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
+*/
 
-  INITIALIZATION AND SEQUENCING REQUIREMENTS
-  None.
-
-  ---------------------------------------------------------------------------
-  Copyright (c) 2016 - 2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
-  Quectel Wireless Solution Proprietary and Confidential.
-  ---------------------------------------------------------------------------
-******************************************************************************/
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -827,7 +823,7 @@ static UINT32 TransactionId = 1;
 static unsigned mbim_default_timeout  = 30000;
 static const char *mbim_apn = NULL;
 static const char *mbim_user = NULL;
-static const char *mbim_passwd = NULL;
+static const char *mbim_pd = NULL;
 static int mbim_iptype = MBIMContextIPTypeDefault;
 static int mbim_auth = MBIMAuthProtocolNone;
 static int mbim_sessionID = 0;
@@ -1163,7 +1159,7 @@ static void mbim_dump_ipconfig(MBIM_IP_CONFIGURATION_INFO_T *pInfo, const char *
         gw = (UINT8 *)(&pInfo->DataBuffer[le32toh(pInfo->IPv4GatewayOffset)-sizeof(MBIM_IP_CONFIGURATION_INFO_T)]);
         mbim_debug("%s gw = %u.%u.%u.%u", direction, gw[0], gw[1], gw[2], gw[3]);
     }
-    if (le32toh(pInfo->IPv4ConfigurationAvailable)&0x3) {
+    if (le32toh(pInfo->IPv4ConfigurationAvailable)&0x4) {
         dns1 = (UINT8 *)(&pInfo->DataBuffer[le32toh(pInfo->IPv4DnsServerOffset) -sizeof(MBIM_IP_CONFIGURATION_INFO_T)]);
         mbim_debug("%s dns1 = %u.%u.%u.%u", direction, dns1[0], dns1[1], dns1[2], dns1[3]);
         if (le32toh(pInfo->IPv4DnsServerCount) == 2) {
@@ -1188,7 +1184,7 @@ static void mbim_dump_ipconfig(MBIM_IP_CONFIGURATION_INFO_T *pInfo, const char *
             direction, gw[0], gw[1], gw[2], gw[3], gw[4], gw[5], gw[6], gw[7], \
             gw[8], gw[9], gw[10], gw[11], gw[12], gw[13], gw[14], gw[15]);
     }
-    if (le32toh(pInfo->IPv6ConfigurationAvailable)&0x3) {
+    if (le32toh(pInfo->IPv6ConfigurationAvailable)&0x4) {
         dns1 = (UINT8 *)(&pInfo->DataBuffer[le32toh(pInfo->IPv6DnsServerOffset)-sizeof(MBIM_IP_CONFIGURATION_INFO_T)]);
         mbim_debug("%s dns1 = %02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x", \
             direction, dns1[0], dns1[1], dns1[2], dns1[3], dns1[4], dns1[5], dns1[6], dns1[7], \
@@ -1947,7 +1943,7 @@ static int mbim_populate_connect_data(MBIM_SET_CONNECT_T **connect_req_ptr) {
     _align_32(buflen);
     if (mbim_user && strlen(mbim_user) > 0) buflen += 2*strlen(mbim_user);
     _align_32(buflen);
-    if (mbim_passwd && strlen(mbim_passwd) > 0) buflen += 2*strlen(mbim_passwd);
+    if (mbim_pd && strlen(mbim_pd) > 0) buflen += 2*strlen(mbim_pd);
     _align_32(buflen);
 
     *connect_req_ptr = (MBIM_SET_CONNECT_T*)malloc(sizeof(MBIM_SET_CONNECT_T) + buflen);
@@ -1972,10 +1968,10 @@ static int mbim_populate_connect_data(MBIM_SET_CONNECT_T **connect_req_ptr) {
         _align_32(offset);
     }
 
-    if (mbim_passwd && strlen(mbim_passwd) > 0) {
-        (*connect_req_ptr)->PasswordSize = htole32(2*strlen(mbim_passwd));
+    if (mbim_pd && strlen(mbim_pd) > 0) {
+        (*connect_req_ptr)->PasswordSize = htole32(2*strlen(mbim_pd));
         (*connect_req_ptr)->PasswordOffset = htole32(offset + sizeof(MBIM_SET_CONNECT_T));
-        offset = char2wchar(mbim_passwd, strlen(mbim_passwd), &(*connect_req_ptr)->DataBuffer[offset], buflen - offset);
+        offset = char2wchar(mbim_pd, strlen(mbim_pd), &(*connect_req_ptr)->DataBuffer[offset], buflen - offset);
     }
 
     return buflen;
@@ -2300,8 +2296,8 @@ static int requestSetupDataCall(PROFILE_T *profile, int curIpFamily) {
         mbim_apn = profile->apn;
     if (profile->user)
         mbim_user = profile->user;
-    if (profile->password)
-        mbim_passwd = profile->password;
+    if (profile->pd)
+        mbim_pd = profile->pd;
     if (profile->auth)
         mbim_auth = profile->auth;
     if (profile->enable_ipv4)

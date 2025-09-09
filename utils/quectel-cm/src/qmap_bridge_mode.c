@@ -1,18 +1,14 @@
-/******************************************************************************
-  @file    qmap_bridge_mode.c
-  @brief   Connectivity bridge manager.
+/*
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-  DESCRIPTION
-  Connectivity Management Tool for USB network adapter of Quectel wireless cellular modules.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
+*/
 
-  INITIALIZATION AND SEQUENCING REQUIREMENTS
-  None.
-
-  ---------------------------------------------------------------------------
-  Copyright (c) 2016 - 2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
-  Quectel Wireless Solution Proprietary and Confidential.
-  ---------------------------------------------------------------------------
-******************************************************************************/
 #include "QMIThread.h"
 
 static size_t ql_fread(const char *filename, void *buf, size_t size) {
@@ -149,7 +145,7 @@ int ql_driver_type_detect(PROFILE_T *profile) {
     return 0;
 }
 
-void ql_set_driver_bridge_mode(PROFILE_T *profile) {
+static void ql_set_driver_bridge_mode(PROFILE_T *profile) {
     char enable[16];
     char filename[256];
 
@@ -160,6 +156,45 @@ void ql_set_driver_bridge_mode(PROFILE_T *profile) {
     snprintf(enable, sizeof(enable), "%02d\n", profile->enable_bridge);
     ql_fwrite(filename, enable, sizeof(enable));
 }
+
+#ifdef CONFIG_QRTR
+static int ql_create_or_detect_rmnet_data(PROFILE_T *profile) {
+    char tmp[128];
+    int muxid = 0,  qmap_version = 0;
+
+    if (access("/sys/module/rmnet_data", F_OK) != 0 /* spf11.x */
+        && access("/sys/module/rmnet_core", F_OK) != 0 /* spf12.x */) {
+        dbg_time("rmnet_data/rmnet_core driver is not support!\n");
+        return -ENOENT;
+    }
+
+    snprintf(tmp, sizeof(tmp), "/sys/class/net/%s", profile->qmapnet_adapter);
+    if (access(tmp, F_OK) && errno == ENOENT) {
+        uint32_t ul_agg_cnt = 0, ul_agg_size = 0;
+
+        if (profile->hardware_interface == HARDWARE_USB) {
+            ul_agg_cnt = 11;
+            ul_agg_size = 4096; //sdx modem may only support 4096
+        }
+        rtrmnet_ctl_new_vnd(profile->usbnet_adapter, profile->qmapnet_adapter,
+              profile->muxid, profile->qmap_version, ul_agg_cnt, ul_agg_size);
+    }
+
+    if (access(tmp, F_OK) && errno == ENOENT) {
+         dbg_time("Fail to detect %s", profile->qmapnet_adapter);
+         return -1;
+    }
+
+    rtrmnet_ctl_get_vnd(profile->qmapnet_adapter, &muxid, &qmap_version);
+    if (qmap_version != profile->qmap_version || muxid != profile->muxid) {
+         dbg_time("wrong qmap_version: %d - %d, muxid: %d - %d",
+              qmap_version, profile->qmap_version, muxid, profile->muxid);
+         return -1;
+    }
+
+    return 0;
+}
+#endif
 
 static int ql_qmi_qmap_mode_detect(PROFILE_T *profile) {
     char buf[128];
@@ -191,6 +226,14 @@ static int ql_qmi_qmap_mode_detect(PROFILE_T *profile) {
             profile->qmap_size = profile->rmnet_info.rx_urb_size;
             profile->qmap_version = profile->rmnet_info.qmap_version;
         }
+
+#ifdef CONFIG_QRTR
+        if (!strcmp(profile->qmapnet_adapter, "use_rmnet_data")) {
+            snprintf(profile->qmapnet_adapter, sizeof(profile->qmapnet_adapter), "%.16s_%d",
+                            profile->usbnet_adapter, profile->pdp);
+             ql_create_or_detect_rmnet_data(profile);
+        }
+#endif
 
         goto _out;
     }
@@ -226,7 +269,7 @@ static int ql_qmi_qmap_mode_detect(PROFILE_T *profile) {
             
             if (profile->qmap_mode > 1) {
                 if(!profile->muxid)
-                	profile->muxid = profile->pdp + 0x80; //muxis is 0x8X for PDN-X
+                     profile->muxid = profile->pdp + 0x80; //muxis is 0x8X for PDN-X
                 snprintf(profile->qmapnet_adapter, sizeof(profile->qmapnet_adapter),
                     "%.16s.%d", profile->usbnet_adapter, profile->muxid - 0x80);
            } if (profile->qmap_mode == 1) {
@@ -305,7 +348,7 @@ static int ql_qmi_qmap_mode_detect(PROFILE_T *profile) {
 
 _out:
     if (profile->qmap_mode) {
-        if (profile->qmap_size == 0) {
+      if (profile->qmap_size == 0) {
             profile->qmap_size = 16*1024;
             snprintf(pl->filename, sizeof(pl->filename), "/sys/class/net/%s/qmap_size", profile->usbnet_adapter);
             if (!access(pl->filename, R_OK)) {
@@ -382,20 +425,30 @@ int ql_qmap_mode_detect(PROFILE_T *profile) {
         return ql_qmi_qmap_mode_detect(profile);
     }
 #ifdef CONFIG_QRTR
-    else if(profile->software_interface == SOFTWARE_QRTR) {
-        char tmp[128];
+    else if (profile->software_interface == SOFTWARE_QRTR) {
+            profile->qmap_mode = 1;
+            profile->qmap_version = WDA_DL_DATA_AGG_QMAP_V5_ENABLED;
+            profile->qmap_size = 15*1024;
+            profile->muxid = 0x80 | profile->pdp;
 
-        profile->qmap_mode = 4;
-        profile->qmap_version = WDA_DL_DATA_AGG_QMAP_V5_ENABLED;
-        profile->qmap_size = 31*1024;
-        profile->muxid = 0x80 | profile->pdp;
-        snprintf(profile->qmapnet_adapter, sizeof(profile->qmapnet_adapter), "rmnet_data%d", profile->muxid&0xF);
+            if (!strcmp(profile->driver_name, "mhi_netdev")) {
+                char linkname[64];
+                char filename[128];
+                int n;
 
-        snprintf(tmp, sizeof(tmp), "/sys/class/net/%s", profile->qmapnet_adapter);
-        if (access(tmp, F_OK)) {
-            rtrmnet_ctl_create_vnd(profile->usbnet_adapter, profile->qmapnet_adapter,
-                profile->muxid, profile->qmap_version, 11, 4096);
+                snprintf(linkname, sizeof(linkname), "/sys/class/net/%s/device", profile->usbnet_adapter);
+                n = readlink(linkname, filename, sizeof(filename));
+                if (n > 0) {
+                    //../../../0308_00.01.00_IP_HW0
+                    filename[n] = '\0';
+                    if (strstr(filename, "_IP_HW0") && strstr(filename+n, "0303_")) //EG18
+                        profile->qmap_version = WDA_DL_DATA_AGG_QMAP_ENABLED;
+                }
         }
+
+        snprintf(profile->qmapnet_adapter, sizeof(profile->qmapnet_adapter), "rmnet_data%d",
+                        profile->pdp);
+        return ql_create_or_detect_rmnet_data(profile);
     }
 #endif
     return 0;
