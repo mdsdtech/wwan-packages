@@ -1,18 +1,14 @@
-/******************************************************************************
-  @file    QMIThread.c
-  @brief   QMI WWAN connectivity manager.
+/*
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-  DESCRIPTION
-  Connectivity Management Tool for USB network adapter of Quectel wireless cellular modules.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
+*/
 
-  INITIALIZATION AND SEQUENCING REQUIREMENTS
-  None.
-
-  ---------------------------------------------------------------------------
-  Copyright (c) 2016 - 2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
-  Quectel Wireless Solution Proprietary and Confidential.
-  ---------------------------------------------------------------------------
-******************************************************************************/
 #include "QMIThread.h"
 #include <inttypes.h>
 
@@ -47,6 +43,9 @@
                 le16_to_cpu(pMUXMsg->QMUXMsgHdrResp.QMUXResult), QMUXError); \
         } \
 } while(0)
+
+#define UIM_APP_TYPE_CSIM   0x04
+#define UIM_APP_TYPE_USIM   0x02
 
 static uint32_t WdsConnectionIPv4Handle = 0;
 static uint32_t WdsConnectionIPv6Handle = 0;
@@ -85,7 +84,6 @@ PQMI_TLV_HDR GetTLV (PQCQMUX_MSG_HDR pQMUXMsgHdr, int TLVType) {
         } else  if (pTLVHdr->TLVType == TLVType) {
             return pTLVHdr;
         }
-
         Length -= (le16_to_cpu((pTLVHdr->TLVLength)) + sizeof(QMI_TLV_HDR));
         pTLVHdr = (PQMI_TLV_HDR)(((UCHAR *)pTLVHdr) + le16_to_cpu(pTLVHdr->TLVLength) + sizeof(QMI_TLV_HDR));
     }
@@ -182,19 +180,19 @@ static USHORT WdsStartNwInterfaceReq(PQMUX_MSG pMUXMsg, void *arg) {
     PQMIWDS_TECHNOLOGY_PREFERECE pTechPref;
     PQMIWDS_AUTH_PREFERENCE pAuthPref;
     PQMIWDS_USERNAME pUserName;
-    PQMIWDS_PASSWD pPasswd;
+    PQMIWDS_PD pPd;
     PQMIWDS_APNNAME pApnName;
     PQMIWDS_IP_FAMILY_TLV pIpFamily;
     USHORT TLVLength = 0;
     UCHAR *pTLV;
     PROFILE_T *profile = (PROFILE_T *)arg;
     const char *profile_user = profile->user;
-    const char *profile_password = profile->password;
+    const char *profile_pd = profile->pd;
     int profile_auth = profile->auth;
 
-    if (s_is_cdma && (profile_user == NULL || profile_user[0] == '\0') && (profile_password == NULL || profile_password[0] == '\0')) {
+    if (s_is_cdma && (profile_user == NULL || profile_user[0] == '\0') && (profile_pd == NULL || profile_pd[0] == '\0')) {
         profile_user = "ctnet@mycdma.cn";
-        profile_password = "vnet.mobi";
+        profile_pd = "vnet.mobi";
         profile_auth = 2; //chap
     }
 
@@ -230,16 +228,16 @@ static USHORT WdsStartNwInterfaceReq(PQMUX_MSG pMUXMsg, void *arg) {
     }
 
     // Set Password
-    if (profile_password) {
-        pPasswd = (PQMIWDS_PASSWD)(pTLV + TLVLength);
-        pPasswd->TLVType = 0x18;
-        pPasswd->TLVLength = cpu_to_le16(strlen(profile_password));
-        qstrcpy((char *)&pPasswd->Passwd, profile_password);
-	TLVLength += (le16_to_cpu(pPasswd->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
+    if (profile_pd) {
+        pPd = (PQMIWDS_PD)(pTLV + TLVLength);
+        pPd->TLVType = 0x18;
+        pPd->TLVLength = cpu_to_le16(strlen(profile_pd));
+        qstrcpy((char *)&pPd->Pd, profile_pd);
+	TLVLength += (le16_to_cpu(pPd->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
     }
 
     // Set Auth Protocol
-    if (profile_user && profile_password) {
+    if (profile_user && profile_pd) {
         pAuthPref = (PQMIWDS_AUTH_PREFERENCE)(pTLV + TLVLength);
         pAuthPref->TLVType = 0x16;
         pAuthPref->TLVLength = cpu_to_le16(0x01);
@@ -254,20 +252,51 @@ static USHORT WdsStartNwInterfaceReq(PQMUX_MSG pMUXMsg, void *arg) {
     pIpFamily->IpFamily = profile->curIpFamily;
     TLVLength += (le16_to_cpu(pIpFamily->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
 
-    //Set Profile Index
-    if (profile->profile_index && !s_is_cdma) { //cdma only support one pdp, so no need to set profile index
-        PQMIWDS_PROFILE_IDENTIFIER pProfileIndex = (PQMIWDS_PROFILE_IDENTIFIER)(pTLV + TLVLength);
-        pProfileIndex->TLVLength = cpu_to_le16(0x01);
-        pProfileIndex->TLVType = 0x31;
-        pProfileIndex->ProfileIndex = profile->profile_index;
-        if (s_is_cdma && s_hdr_personality == 0x02) {
-            pProfileIndex->TLVType = 0x32; //profile_index_3gpp2
-            pProfileIndex->ProfileIndex = 101;
-        }
-        TLVLength += (le16_to_cpu(pProfileIndex->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
+    if(profile->usb_dev.idProduct != 0x0316){
+    
+      //Set Profile Index
+      if (profile->profile_index && !s_is_cdma) { //cdma only support one pdp, so no need to set profile index
+          PQMIWDS_PROFILE_IDENTIFIER pProfileIndex = (PQMIWDS_PROFILE_IDENTIFIER)(pTLV + TLVLength);
+          pProfileIndex->TLVLength = cpu_to_le16(0x01);
+          pProfileIndex->TLVType = 0x31;
+          pProfileIndex->ProfileIndex = profile->profile_index;
+          if (s_is_cdma && s_hdr_personality == 0x02) {
+              pProfileIndex->TLVType = 0x32; //profile_index_3gpp2
+              pProfileIndex->ProfileIndex = 101;
+          }
+          TLVLength += (le16_to_cpu(pProfileIndex->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
+      }
     }
+    else if(profile->usb_dev.idProduct == 0x0316){
+   
+      if(profile->bring_up_by_apn_name)
+      {
+          PQMIWDS_BRINGUP_APNNAME pBring_up_by_apn_name = (PQMIWDS_BRINGUP_APNNAME)(pTLV + TLVLength);        
+          pBring_up_by_apn_name->TLVLength = cpu_to_le16(0x01);  
+          pBring_up_by_apn_name->TLVType = 0x3C;
+          pBring_up_by_apn_name->bring_up_by_apn_name  =   profile->bring_up_by_apn_name;
+          TLVLength += (le16_to_cpu(pBring_up_by_apn_name->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
+      }
 
-    return sizeof(QMIWDS_START_NETWORK_INTERFACE_REQ_MSG) + TLVLength;
+      if(profile->bring_up_by_apn_type)
+      {
+          PQMIWDS_BRINGUP_APNTYPE pBring_up_by_apn_type = (PQMIWDS_BRINGUP_APNTYPE)(pTLV + TLVLength); 
+          pBring_up_by_apn_type->TLVLength = cpu_to_le16(0x01);  
+          pBring_up_by_apn_type->TLVType = 0x3D;
+          pBring_up_by_apn_type->bring_up_by_apn_type  =   profile->bring_up_by_apn_type;
+          TLVLength += (le16_to_cpu(pBring_up_by_apn_type->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
+      }
+    
+      if(profile->apn_type)
+      {
+          PQMIWDS_APN_TYPE pApn_type = (PQMIWDS_APN_TYPE)(pTLV + TLVLength); 
+          pApn_type->TLVLength = cpu_to_le32(0x04);  
+          pApn_type->TLVType = 0x38;
+          pApn_type->apn_type = cpu_to_le32(profile->apn_type);
+          TLVLength += (le16_to_cpu(pApn_type->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
+      }  
+   }
+      return sizeof(QMIWDS_START_NETWORK_INTERFACE_REQ_MSG) + TLVLength;
 }
 
 static USHORT WdsStopNwInterfaceReq(PQMUX_MSG pMUXMsg, void *arg) {
@@ -546,16 +575,16 @@ static USHORT WdsModifyProfileSettingsReq(PQMUX_MSG pMUXMsg, void *arg) {
     }
 
     // Set Password
-    if (profile->password) {
-        PQMIWDS_PASSWD pPasswd = (PQMIWDS_PASSWD)(pTLV + TLVLength);
-        pPasswd->TLVType = 0x1C;
-        pPasswd->TLVLength = cpu_to_le16(strlen(profile->password));
-        qstrcpy((char *)&pPasswd->Passwd, profile->password);
-        TLVLength +=(le16_to_cpu(pPasswd->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
+    if (profile->pd) {
+        PQMIWDS_PD pPd = (PQMIWDS_PD)(pTLV + TLVLength);
+        pPd->TLVType = 0x1C;
+        pPd->TLVLength = cpu_to_le16(strlen(profile->pd));
+        qstrcpy((char *)&pPd->Pd, profile->pd);
+        TLVLength +=(le16_to_cpu(pPd->TLVLength) + sizeof(QCQMICTL_TLV_HDR));
     }
 
     // Set Auth Protocol
-    if (profile->user && profile->password) {
+    if (profile->user && profile->pd) {
         PQMIWDS_AUTH_PREFERENCE pAuthPref = (PQMIWDS_AUTH_PREFERENCE)(pTLV + TLVLength);
         pAuthPref->TLVType = 0x1D;
         pAuthPref->TLVLength = cpu_to_le16(0x01);
@@ -621,17 +650,19 @@ int QmiThreadSendQMITimeout(PQCQMIMSG pRequest, PQCQMIMSG *ppResponse, unsigned 
     s_pResponse = NULL;
 
     ret = qmidev_send(pRequest);
-
     if (ret == 0) {
         ret = pthread_cond_timeout_np(&cm_command_cond, &cm_command_mutex, msecs);
         if (!ret) {
             if (s_pResponse && ppResponse) {
                 *ppResponse = s_pResponse;
-            } else {
-                if (s_pResponse) {
-                    free(s_pResponse);
-                    s_pResponse = NULL;
-                }
+            }
+            else if (s_pResponse) {
+                free(s_pResponse);
+                s_pResponse = NULL;
+            }
+            else {
+                dbg_time("%s message null", funcname);
+                ret = -EINVAL;
             }
         } else {
             dbg_time("%s message timeout", funcname);
@@ -762,10 +793,19 @@ static int requestSetEthMode(PROFILE_T *profile) {
             qmap_settings.ep_type = DATA_EP_TYPE_PCIE;
             qmap_settings.iface_id = 0x04;
         }
+        else if (profile->hardware_interface == HARDWARE_IPA) { // for inside sdx
+            qmap_settings.rx_urb_size = profile->qmap_size; //SDX24&SDX55 support 32KB
+            qmap_settings.ep_type = DATA_EP_TYPE_EMBEDDED;
+            qmap_settings.iface_id = 1; //DSI_DEFAULT_EPID_IPA;
+            //skip for netmgrd send QMI_WDA_SET_DATA_FORMAT_REQ_V01 & QMI_DPM_OPEN_PORT_REQ_V01
+            goto skip_WdaSetDataFormat;
+        }
         else { // for MDM9x07&MDM9x40&SDX20 USB
             qmap_settings.rx_urb_size = profile->qmap_size; //SDX24&SDX55 support 32KB
             qmap_settings.ep_type = DATA_EP_TYPE_HSUSB;
             qmap_settings.iface_id = 0x04;
+            if(profile->usb_dev.idProduct == 0x0316) //X35 Rmnet interface is 3
+                qmap_settings.iface_id = 0x03;
         }
 
         qmap_settings.ul_data_aggregation_max_datagrams = 11; //by test result, 11 can get best TPUT
@@ -935,12 +975,12 @@ static int requestGetSIMStatus(SIM_Status *pSIMStatus) { //RIL_REQUEST_GET_SIM_S
 
     err = QmiThreadSendQMI(pRequest, &pResponse);
     qmi_rsp_check_and_return();
-
     *pSIMStatus = SIM_ABSENT;
     if (s_9x07)
     {
         PQMIUIM_CARD_STATUS pCardStatus = NULL;
         PQMIUIM_PIN_STATE pPINState = NULL;
+        QMIUI_APP_INFO *appinfo = NULL;
         UCHAR CardState = 0x01;
         UCHAR PIN1State = QMI_PIN_STATUS_NOT_VERIF;
         //UCHAR PIN1Retries;
@@ -950,9 +990,19 @@ static int requestGetSIMStatus(SIM_Status *pSIMStatus) { //RIL_REQUEST_GET_SIM_S
         //UCHAR PUK2Retries;
 
         pCardStatus = (PQMIUIM_CARD_STATUS)GetTLV(&pResponse->MUXMsg.QMUXMsgHdr, 0x10);
+
         if (pCardStatus != NULL)
         {
-            pPINState = (PQMIUIM_PIN_STATE)((PUCHAR)pCardStatus + sizeof(QMIUIM_CARD_STATUS) + pCardStatus->AIDLength);
+            pPINState = (PQMIUIM_PIN_STATE)((PUCHAR)pCardStatus + sizeof(QMIUIM_CARD_STATUS) + pCardStatus->APP_INFO.AIDLength);
+            for(int app_index = 0; app_index < pCardStatus->NumApp - 1; app_index++)
+            {
+                if (pCardStatus->APP_INFO.AppType != UIM_APP_TYPE_USIM)
+                {
+                    appinfo = (QMIUI_APP_INFO *)((PUCHAR)pPINState + sizeof(QMIUIM_PIN_STATE));
+                    pPINState = (PQMIUIM_PIN_STATE)((PUCHAR)appinfo + sizeof(QMIUI_APP_INFO) + appinfo->AIDLength);
+                }
+            }
+
             CardState  = pCardStatus->CardState;
             if (CardState == UIM_CARD_STATE_PRESENT) {
                 if (pPINState->UnivPIN == 1)
@@ -1056,6 +1106,8 @@ static int requestGetICCID(void) { //RIL_REQUEST_GET_IMSI
     PQMUX_MSG pMUXMsg;
     PQMIUIM_CONTENT pUimContent;
     int err;
+
+    //dbg_time("enter requestGetICCID_2");
 
     if (s_9x07) {
         pRequest = ComposeQMUXMsg(QMUX_TYPE_UIM, QMIUIM_READ_TRANSPARENT_REQ, UimReadTransparentIMSIReqSend, (void *)"EF_ICCID");
@@ -1414,6 +1466,8 @@ static int requestRegistrationState2(UCHAR *pPSAttachedState) {
     s_is_cdma = 0;
     s_5g_type = WWAN_DATA_CLASS_NONE;
     s_hdr_personality = 0;
+    //dbg_time("pServiceStatusInfo->TLVType:%d\n", pServiceStatusInfo->TLVType);
+    //dbg_time("remainingLen:%ld\n", remainingLen);
     while (remainingLen > 0) {
         switch (pServiceStatusInfo->TLVType) {
         case 0x10: // CDMA
@@ -1475,6 +1529,7 @@ static int requestRegistrationState2(UCHAR *pPSAttachedState) {
             if (pNr5gSystemInfo->network_id_valid == 0x01) {
                 MobileCountryCode = (USHORT)char2ushort(pNr5gSystemInfo->MCC);
                 MobileNetworkCode = (USHORT)char2ushort(pNr5gSystemInfo->MNC);
+                //dbg_time("%d", __LINE__);
             }
             break;
         case 0x4E: //Additional LTE System Info - Availability of Dual Connectivity of E-UTRA with NR5G
@@ -1513,6 +1568,7 @@ static int requestRegistrationState2(UCHAR *pPSAttachedState) {
             if (pCdmaSystemInfo->NetworkIdValid == 0x01) {
                 MobileCountryCode = (USHORT)char2ushort(pCdmaSystemInfo->MCC);
                 MobileNetworkCode = (USHORT)char2ushort(pCdmaSystemInfo->MNC);
+                //dbg_time("%d", __LINE__);
             }
             break;
         case 0x16: // HDR
@@ -1543,6 +1599,7 @@ static int requestRegistrationState2(UCHAR *pPSAttachedState) {
             if(!requestGetHomeNetwork(&cmda_mcc, &cdma_mnc,NULL, NULL) && cmda_mcc) {
                 quectel_convert_cdma_mcc_2_ascii_mcc(&MobileCountryCode, cmda_mcc);
                 quectel_convert_cdma_mnc_2_ascii_mnc(&MobileNetworkCode, cdma_mnc);
+                //dbg_time("%d", __LINE__);
             }
             break;
         case 0x17: // GSM
@@ -1564,6 +1621,7 @@ static int requestRegistrationState2(UCHAR *pPSAttachedState) {
             if (pGsmSystemInfo->NetworkIdValid == 0x01) {
                 MobileCountryCode = (USHORT)char2ushort(pGsmSystemInfo->MCC);
                 MobileNetworkCode = (USHORT)char2ushort(pGsmSystemInfo->MNC);
+                //dbg_time("%d", __LINE__);
             }
             break;
         case 0x18: // WCDMA
@@ -1585,6 +1643,7 @@ static int requestRegistrationState2(UCHAR *pPSAttachedState) {
             if (pWcdmaSystemInfo->NetworkIdValid == 0x01) {
                 MobileCountryCode = (USHORT)char2ushort(pWcdmaSystemInfo->MCC);
                 MobileNetworkCode = (USHORT)char2ushort(pWcdmaSystemInfo->MNC);
+                //dbg_time("%d", __LINE__);
             }
             break;
         case 0x19: // LTE_SYSTEM_INFO
@@ -1610,6 +1669,7 @@ static int requestRegistrationState2(UCHAR *pPSAttachedState) {
             if (pLteSystemInfo->NetworkIdValid == 0x01) {
                 MobileCountryCode = (USHORT)char2ushort(pLteSystemInfo->MCC);
                 MobileNetworkCode = (USHORT)char2ushort(pLteSystemInfo->MNC);
+                //dbg_time("%d", __LINE__);
             }
             break;
         case 0x25: // TDSCDMA
@@ -1631,6 +1691,7 @@ static int requestRegistrationState2(UCHAR *pPSAttachedState) {
             if (pTdscdmaSystemInfo->NetworkIdValid == 0x01) {
                 MobileCountryCode = (USHORT)char2ushort(pTdscdmaSystemInfo->MCC);
                 MobileNetworkCode = (USHORT)char2ushort(pTdscdmaSystemInfo->MNC);
+                //dbg_time("%d", __LINE__);
             }
             break;
         default:
@@ -2031,15 +2092,15 @@ static int requestSetProfile(PROFILE_T *profile) {
     int err;
     const char *new_apn = profile->apn ? profile->apn : "";
     const char *new_user = profile->user ? profile->user : "";
-    const char *new_password = profile->password ? profile->password : "";
+    const char *new_pd = profile->pd ? profile->pd : "";
     const char *ipStr[] = {"IPV4", "NULL", "IPV6", "IPV4V6"};
 
-    dbg_time("%s[pdp:%d index:%d] %s/%s/%s/%d/%s", __func__, profile->pdp, profile->profile_index, profile->apn, profile->user, profile->password, profile->auth,ipStr[profile->iptype]);
+    dbg_time("%s[pdp:%d index:%d] %s/%s/%s/%d/%s", __func__, profile->pdp, profile->profile_index, profile->apn, profile->user, profile->pd, profile->auth,ipStr[profile->iptype]);
     if (!profile->profile_index)
         return -1;
 
     if ( !strcmp(profile->old_apn, new_apn) && !strcmp(profile->old_user, new_user)
-        && !strcmp(profile->old_password, new_password)
+        && !strcmp(profile->old_pd, new_pd)
         && profile->old_iptype == profile->iptype
         && profile->old_auth == profile->auth)
     {
@@ -2062,7 +2123,7 @@ static int requestGetProfile(PROFILE_T *profile) {
     int err;
     PQMIWDS_APNNAME pApnName;
     PQMIWDS_USERNAME pUserName;
-    PQMIWDS_PASSWD pPassWd;
+    PQMIWDS_PD pPd;
     PQMIWDS_AUTH_PREFERENCE pAuthPref;
     PQMIWDS_IPTYPE pIpType;
     PQMIWDS_PDPCONTEXT pPdpContext;
@@ -2070,7 +2131,7 @@ static int requestGetProfile(PROFILE_T *profile) {
     
     const char *ipStr[] = {"IPV4", "NULL", "IPV6", "IPV4V6"};
 
-    profile->old_apn[0] = profile->old_user[0] = profile->old_password[0] = '\0';
+    profile->old_apn[0] = profile->old_user[0] = profile->old_pd[0] = '\0';
     profile->old_auth = 0;
     profile->old_iptype = 0;
     if (profile->enable_ipv4 && profile->enable_ipv6)
@@ -2091,11 +2152,12 @@ _re_check:
     pProfileList = (PQMIWDS_PROFILELIST)GetTLV(&pResponse->MUXMsg.QMUXMsgHdr, 0x01);
     uint8 profile_indexs[42] = {0};
     uint8 profile_num = pProfileList->ProfileList[0];
+    uint8 i;
     if(profile_num >= 1)
     {
         uint8 j = 0;
         uint8 k = 2;
-        for(int i=0; i<profile_num; i++)
+        for(i=0; i<profile_num; i++)
         {
             profile_indexs[j++] = pProfileList->ProfileList[k];
             if(pProfileList->ProfileList[++k] == 0)
@@ -2106,7 +2168,7 @@ _re_check:
     }
     free(pResponse);
     
-    for(int i=0; i<profile_num; i++)
+    for(i=0; i<profile_num; i++)
     {
         profile->profile_index = profile_indexs[i];
         
@@ -2133,7 +2195,7 @@ _re_check:
 
     pApnName = (PQMIWDS_APNNAME)GetTLV(&pResponse->MUXMsg.QMUXMsgHdr, 0x14);
     pUserName = (PQMIWDS_USERNAME)GetTLV(&pResponse->MUXMsg.QMUXMsgHdr, 0x1B);
-    pPassWd = (PQMIWDS_PASSWD)GetTLV(&pResponse->MUXMsg.QMUXMsgHdr, 0x1C);
+    pPd = (PQMIWDS_PD)GetTLV(&pResponse->MUXMsg.QMUXMsgHdr, 0x1C);
     pAuthPref = (PQMIWDS_AUTH_PREFERENCE)GetTLV(&pResponse->MUXMsg.QMUXMsgHdr, 0x1D);
     pIpType = (PQMIWDS_IPTYPE)GetTLV(&pResponse->MUXMsg.QMUXMsgHdr, 0x11);
 
@@ -2141,8 +2203,8 @@ _re_check:
         uchar2char(profile->old_apn, sizeof(profile->old_apn), &pApnName->ApnName, le16_to_cpu(pApnName->TLVLength));
     if (pUserName/*  && pUserName->UserName*/)
         uchar2char(profile->old_user, sizeof(profile->old_user), &pUserName->UserName, le16_to_cpu(pUserName->TLVLength));
-    if (pPassWd/*  && le16_to_cpu(pPassWd->TLVLength)*/)
-        uchar2char(profile->old_password, sizeof(profile->old_password), &pPassWd->Passwd, le16_to_cpu(pPassWd->TLVLength));
+    if (pPd/*  && le16_to_cpu(pPd->TLVLength)*/)
+        uchar2char(profile->old_pd, sizeof(profile->old_pd), &pPd->Pd, le16_to_cpu(pPd->TLVLength));
     if (pAuthPref/*  && le16_to_cpu(pAuthPref->TLVLength)*/) {
         profile->old_auth = pAuthPref->AuthPreference;
     }
@@ -2150,7 +2212,7 @@ _re_check:
         profile->old_iptype = pIpType->IPType;
     }
 
-    dbg_time("%s[pdp:%d index:%d] %s/%s/%s/%d/%s", __func__, profile->pdp, profile->profile_index, profile->old_apn, profile->old_user, profile->old_password, profile->old_auth, ipStr[profile->old_iptype]);
+    dbg_time("%s[pdp:%d index:%d] %s/%s/%s/%d/%s", __func__, profile->pdp, profile->profile_index, profile->old_apn, profile->old_user, profile->old_pd, profile->old_auth, ipStr[profile->old_iptype]);
 
     free(pResponse);
     return 0;

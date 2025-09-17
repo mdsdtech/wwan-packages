@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.61])
-AC_INIT([quectel-CM], [1.0], [fae-support@quectel.com])
+AC_INIT([quectel-CM], [1.0], [xxx@xxx.xxx])
 AC_CONFIG_HEADERS([config.h])
 
 # Checks for programs.

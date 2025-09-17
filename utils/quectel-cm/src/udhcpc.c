@@ -1,18 +1,14 @@
-/******************************************************************************
-  @file    udhcpc.c
-  @brief   call DHCP tools to obtain IP address.
+/*
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-  DESCRIPTION
-  Connectivity Management Tool for USB network adapter of Quectel wireless cellular modules.
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
+*/
 
-  INITIALIZATION AND SEQUENCING REQUIREMENTS
-  None.
-
-  ---------------------------------------------------------------------------
-  Copyright (c) 2016 - 2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
-  Quectel Wireless Solution Proprietary and Confidential.
-  ---------------------------------------------------------------------------
-******************************************************************************/
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/types.h>
@@ -530,7 +526,7 @@ void udhcpc_start(PROFILE_T *profile) {
     if (profile->ipv4.Address == 0)
         goto set_ipv6;
 
-    if (profile->no_dhcp || profile->request_ops == &mbim_request_ops) { //lots of mbim modem do not support DHCP
+    if (profile->no_dhcp || profile->usb_dev.idProduct == 0x0316 || profile->request_ops == &mbim_request_ops) { //lots of mbim modem do not support DHCP
         update_ip_address_by_qmi(ifname, &profile->ipv4, NULL);
     }
     else

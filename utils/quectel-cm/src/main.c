@@ -1,18 +1,13 @@
-/******************************************************************************
-  @file    main.c
-  @brief   The entry program.
+/*
+    Copyright 2025 Quectel Wireless Solutions Co.,Ltd
 
-  DESCRIPTION
-  Connectivity Management Tool for USB network adapter of Quectel wireless cellular modules.
-
-  INITIALIZATION AND SEQUENCING REQUIREMENTS
-  None.
-
-  ---------------------------------------------------------------------------
-  Copyright (c) 2016 -2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
-  Quectel Wireless Solution Proprietary and Confidential.
-  ---------------------------------------------------------------------------
-******************************************************************************/
+    Quectel hereby grants customers of Quectel a license to use, modify,
+    distribute and publish the Software in binary form provided that
+    customers shall have no right to reverse engineer, reverse assemble,
+    decompile or reduce to source code form any portion of the Software. 
+    Under no circumstances may customers modify, demonstrate, use, deliver 
+    or disclose any portion of the Software in source code form.
+*/
 
 #include "QMIThread.h"
 #include <sys/wait.h>
@@ -27,12 +22,16 @@ static PROFILE_T s_profile;
 int debug_qmi = 0;
 int qmidevice_control_fd[2];
 static int signal_control_fd[2];
+#ifdef USE_IPC_MSG_STATUS_IND
+static int qcm_status_indication_fd[2];
+#endif
 int g_donot_exit_when_modem_hangup = 0;
 extern int ql_ifconfig(int argc, char *argv[]);
 extern int ql_get_netcard_driver_info(const char*);
 extern int ql_capture_usbmon_log(PROFILE_T *profile, const char *log_path);
 extern void ql_stop_usbmon_log(PROFILE_T *profile);
 //UINT ifc_get_addr(const char *ifname);
+extern int cdc_wdm_fd;
 static int s_link = -1;
 static void usbnet_link_change(int link, PROFILE_T *profile) {
     if (s_link == link)
@@ -84,6 +83,12 @@ static void send_signo_to_main(int signo) {
      if (write(signal_control_fd[0], &signo, sizeof(signo)) == -1) {};
 }
 
+#ifdef USE_IPC_MSG_STATUS_IND
+static void main_send_status_to_fifo(uint8_t status) {
+     if (write(qcm_status_indication_fd[0], &status, sizeof(status)) == -1) {};
+}
+#endif
+
 void qmidevice_send_event_to_main(int triger_event) {
      if (write(qmidevice_control_fd[1], &triger_event, sizeof(triger_event)) == -1) {};
 }
@@ -92,6 +97,134 @@ void qmidevice_send_event_to_main_ext(int triger_event, void *data, unsigned len
      if (write(qmidevice_control_fd[1], &triger_event, sizeof(triger_event)) == -1) {};
      if (write(qmidevice_control_fd[1], data, len) == -1) {};
 }
+
+#ifdef USE_IPC_MSG_STATUS_IND
+static int msg_get()
+{
+    key_t key = ftok(MSG_FILE, 'a');
+    int msgid = msgget(key, IPC_CREAT | 0644);
+
+    if (msgid < 0)
+    {
+        dbg_time("msgget fail: key %d, %s", key, strerror(errno));
+        return -1;
+    }
+    return msgid;
+}
+
+static int msg_rm(int msgid)
+{
+    return msgctl(msgid, IPC_RMID, 0);
+}
+
+static int msg_send(int msgid, long type, const char *msg)
+{
+    struct message info;
+    info.mtype = type;
+    snprintf(info.mtext, MSGBUFFSZ, "%s", msg);
+    if (msgsnd(msgid, (void *)&info, MSGBUFFSZ, IPC_NOWAIT) < 0)
+    {
+        dbg_time("msgsnd faild: msg %s, %s", msg, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+void* qcm_status_thread(void *arg)
+{
+    uint8_t status = 0;
+    int msgid = -1;
+    char buf[MSGBUFFSZ] = {0};
+
+    uint8_t* tmp = arg;
+    if (tmp == NULL)
+    {
+        dbg_time("%s qcm start report status", __func__);
+    }
+
+    if (access(MSG_FILE, F_OK))
+    {
+        dbg_time("%s %s isn't exit", __func__, MSG_FILE);
+        pthread_exit(NULL);
+        return (void*)0;
+    }
+    else
+    {
+        msgid = msg_get();
+        if (msgid < 0)
+        {
+            dbg_time("%s msg_get fail", __func__);
+            pthread_exit(NULL);
+            return (void*)0;
+        }
+    }
+
+    while (1)
+    {
+        struct pollfd pollfds[] = {{qcm_status_indication_fd[1], POLLIN, 0}};
+        int ret;
+
+        do
+        {
+            ret = poll(pollfds, 1,  -1);
+        } while ((ret < 0) && (errno == EINTR));
+
+        if (ret <= 0) {
+            dbg_time("%s poll=%d, errno: %d (%s)", __func__, ret, errno, strerror(errno));
+            break;
+        }
+
+        if (pollfds[0].revents & (POLLERR | POLLHUP | POLLNVAL))
+        {
+            dbg_time("%s poll err/hup", __func__);
+            dbg_time("epoll pollfds[0].fd = %d, pollfds[0].events = 0x%04x", pollfds[0].fd, pollfds[0].revents);
+            break;
+        }
+
+        if ((pollfds[0].revents & POLLIN) == 0)
+        {
+            continue;
+        }
+
+        if (read(pollfds[0].fd, &status, sizeof(status)) == sizeof(status))
+        {
+            memset(buf, 0, sizeof(buf));
+            snprintf(buf, sizeof(buf), "%d", status);
+
+            if (msg_send(msgid, MSG_TYPE_IPC, buf) >= 0)
+            {
+                //dbg_time("%s msg_send success msgid = %d  status = %d", __func__, msgid, status);
+            }
+            else
+            {
+                dbg_time("%s msg_send fail", __func__);
+                break;
+            }
+
+            if (status == QCM_PROCESS_EXIT)
+            {
+                dbg_time("%s qcm process exit", __func__);
+                usleep(100000);
+                break;
+            }
+        }
+        else
+        {
+            dbg_time("%s read fail", __func__);
+            break;
+        }
+    }
+
+    if (msg_rm(msgid) < 0)
+    {
+        dbg_time("%s msg_rm fail", __func__);
+    }
+
+    dbg_time("%s exit", __func__);
+    pthread_exit(NULL);
+    return (void*)0;
+}
+#endif
 
 #define MAX_PATH 256
 
@@ -251,6 +384,8 @@ static int usage(const char *progname) {
     dbg_time("-b                                     Enable network interface bridge function (default 0)");
     dbg_time("-v                                     Verbose log mode, for debug purpose.");
     dbg_time("-d                                     Obtain the IP address and dns through qmi");
+    dbg_time("-a                                     1:Device attempts to bring up a call with the APN name,if -a 1 need add -s apn_name ;2:Device attempts to bring up a call with the APN type,if -a 2 need add -y apn_type");
+    dbg_time("-y                                     Set APN type 0:APN type unspecified 1:internet traffic. 2:IMS");
     dbg_time("[Examples]");
     dbg_time("Example 1: %s ", progname);
     dbg_time("Example 2: %s -s 3gnet ", progname);
@@ -277,6 +412,9 @@ static int qmi_main(PROFILE_T *profile)
     int qmierr = 0;
     const struct request_ops *request_ops = profile ->request_ops;
     pthread_t gQmiThreadID = 0;
+#ifdef USE_IPC_MSG_STATUS_IND
+    pthread_t gQcmStatusThreadID = 0;
+#endif
 
 //sudo apt-get install udhcpc
 //sudo apt-get remove ModemManager
@@ -284,6 +422,8 @@ static int qmi_main(PROFILE_T *profile)
         if (!reattach_driver(profile)) 
             sleep(2);
     }
+
+    g_donot_exit_when_modem_hangup = 0;
 
     /* try to recreate FDs*/
     if (socketpair( AF_LOCAL, SOCK_STREAM, 0, signal_control_fd) < 0 ) {
@@ -296,10 +436,24 @@ static int qmi_main(PROFILE_T *profile)
         return 0;
     }
 
+#ifdef USE_IPC_MSG_STATUS_IND
+    if ( socketpair( AF_LOCAL, SOCK_STREAM, 0, qcm_status_indication_fd ) < 0 ) {
+        dbg_time("%s Failed to create thread qcm_status_indication_fd socket pair: %d (%s)", __func__, errno, strerror(errno));
+        return 0;
+    }
+#endif
+
     if ((profile->qmap_mode == 0 || profile->qmap_mode == 1)
         && (!profile->proxy[0] || strstr(profile->qmichannel, "_IPCR"))) {
         kill_brothers(profile->qmichannel);
-     }
+    }
+
+#ifdef USE_IPC_MSG_STATUS_IND
+    if (pthread_create( &gQcmStatusThreadID, 0, qcm_status_thread, NULL) != 0) {
+        dbg_time("%s Failed to create QMIThread: %d (%s)", __func__, errno, strerror(errno));
+        return 0;
+    }
+#endif
 
     if (pthread_create( &gQmiThreadID, 0, profile->qmi_ops->read, (void *)profile) != 0) {
         dbg_time("%s Failed to create QMIThread: %d (%s)", __func__, errno, strerror(errno));
@@ -316,6 +470,10 @@ static int qmi_main(PROFILE_T *profile)
         dbg_time("%s Failed to qmi init: %d (%s)", __func__, errno, strerror(errno));
         return 0;
     }
+
+#ifdef USE_IPC_MSG_STATUS_IND
+    main_send_status_to_fifo(QCM_PARA_CONFIG_QUERY);
+#endif
 
     if (request_ops->requestBaseBandVersion)
         request_ops->requestBaseBandVersion(profile);
@@ -349,11 +507,12 @@ static int qmi_main(PROFILE_T *profile)
         if (request_ops->requestGetIMSI)
             request_ops->requestGetIMSI();
     }
-
+if(profile->usb_dev.idProduct != 0x0316)
+{
     if (request_ops->requestGetProfile)
         request_ops->requestGetProfile(profile);
 
-    if (request_ops->requestSetProfile && (profile->apn || profile->user || profile->password)) {
+    if (request_ops->requestSetProfile && (profile->apn || profile->user || profile->pd)) {
         if (request_ops->requestSetProfile(profile) == 1) {
 #ifdef REBOOT_SIM_CARD_WHEN_APN_CHANGE //enable at only when customer asked 
             if (request_ops->requestRadioPower) {
@@ -363,7 +522,7 @@ static int qmi_main(PROFILE_T *profile)
 #endif
         }
     }
-
+}
     request_ops->requestRegistrationState(&PSAttachedState);
 
 #ifdef CONFIG_ENABLE_QOS
@@ -409,6 +568,9 @@ static int qmi_main(PROFILE_T *profile)
                 dbg_time("%s poll err/hup", __func__);
                 dbg_time("epoll fd = %d, events = 0x%04x", fd, revents);
                 main_send_event_to_qmidevice(RIL_REQUEST_QUIT);
+#ifdef USE_IPC_MSG_STATUS_IND
+                main_send_status_to_fifo(QCM_PROCESS_EXIT);
+#endif
                 if (revents & POLLHUP)
                     goto __main_quit;
             }
@@ -432,10 +594,14 @@ static int qmi_main(PROFILE_T *profile)
                                 break;
                             }
 
+#ifdef USE_IPC_MSG_STATUS_IND
+                            main_send_status_to_fifo(QCM_PREPARE_START_DAIL);
+#endif
+
                             if (profile->enable_ipv4 && IPv4ConnectionStatus !=  QWDS_PKT_DATA_CONNECTED) {
                                 qmierr = request_ops->requestSetupDataCall(profile, IpFamilyV4);
 
-                                if ((qmierr > 0) && profile->user && profile->user[0] && profile->password && profile->password[0]) {
+                                if ((qmierr > 0) && profile->user && profile->user[0] && profile->pd && profile->pd[0]) {
                                     int old_auto =  profile->auth;
 
                                     //may be fail because wrong auth mode, try pap->chap, or chap->pap
@@ -449,7 +615,12 @@ static int qmi_main(PROFILE_T *profile)
                                 if (!qmierr) {
                                     qmierr = request_ops->requestGetIPAddress(profile, IpFamilyV4);
                                     if (!qmierr)
+                                    {
                                         IPv4ConnectionStatus = QWDS_PKT_DATA_CONNECTED;
+#ifdef USE_IPC_MSG_STATUS_IND
+                                        main_send_status_to_fifo(QCM_NETWORK_IPV4_CONNECTED);
+#endif
+                                    }
                                 }
                                         
                             }
@@ -464,7 +635,12 @@ static int qmi_main(PROFILE_T *profile)
                                     if (!qmierr) {
                                         qmierr = request_ops->requestGetIPAddress(profile, IpFamilyV6);
                                         if (!qmierr)
+                                        {
                                             IPv6ConnectionStatus = QWDS_PKT_DATA_CONNECTED;
+#ifdef USE_IPC_MSG_STATUS_IND
+                                            main_send_status_to_fifo(QCM_NETWORK_IPV6_CONNECTED);
+#endif
+                                        }
                                     }
                                 }
                             }
@@ -481,10 +657,16 @@ static int qmi_main(PROFILE_T *profile)
                                 dbg_time("try to requestSetupDataCall %ld second later", SetupCallAllowTime);
                                 alarm(SetupCallAllowTime);
                                 SetupCallAllowTime = SetupCallAllowTime*1000 + clock_msec();
+#ifdef USE_IPC_MSG_STATUS_IND
+                                main_send_status_to_fifo(QCM_PREPARE_RESTART_DAIL);
+#endif
                             }
                             else if (IPv4ConnectionStatus ==  QWDS_PKT_DATA_CONNECTED || IPv6ConnectionStatus ==  QWDS_PKT_DATA_CONNECTED) {
                                 SetupCallFail = 0;
                                 SetupCallAllowTime = clock_msec();
+#ifdef USE_IPC_MSG_STATUS_IND
+                                main_send_status_to_fifo(QCM_PREPARE_DAIL_SUCC);
+#endif
                             }
                         break;
 
@@ -566,7 +748,27 @@ static int qmi_main(PROFILE_T *profile)
                                     link |= (1<<IpFamilyV6);
                                 usbnet_link_change(link, profile);
                             }
-                            
+
+#ifdef USE_IPC_MSG_STATUS_IND
+                            if ((profile->enable_ipv4 && IPv4ConnectionStatus ==  QWDS_PKT_DATA_DISCONNECTED))
+                            {
+                                main_send_status_to_fifo(QCM_NETWORK_IPV4_DISCONNECTED);
+                            }
+                            else
+                            {
+                                main_send_status_to_fifo(QCM_NETWORK_IPV4_CONNECTED);
+                            }
+
+                            if ((profile->enable_ipv6 && IPv6ConnectionStatus ==  QWDS_PKT_DATA_DISCONNECTED))
+                            {
+                                main_send_status_to_fifo(QCM_NETWORK_IPV6_DISCONNECTED);
+                            }
+                            else
+                            {
+                                main_send_status_to_fifo(QCM_NETWORK_IPV6_CONNECTED);
+                            }
+#endif
+
                             if ((profile->enable_ipv4 && IPv4ConnectionStatus ==  QWDS_PKT_DATA_DISCONNECTED)
                                 || (profile->enable_ipv6 && IPv6ConnectionStatus ==  QWDS_PKT_DATA_DISCONNECTED)) {
                                 send_signo_to_main(SIG_EVENT_START);
@@ -586,6 +788,9 @@ static int qmi_main(PROFILE_T *profile)
                                 }
                             }
                             usbnet_link_change(0, profile);
+#ifdef USE_IPC_MSG_STATUS_IND
+                            main_send_status_to_fifo(QCM_PROCESS_EXIT);
+#endif
                             if (profile->qmi_ops->deinit)
                                 profile->qmi_ops->deinit();
                             main_send_event_to_qmidevice(RIL_REQUEST_QUIT);
@@ -636,14 +841,14 @@ static int qmi_main(PROFILE_T *profile)
 
                     	case RIL_UNSOL_LOOPBACK_CONFIG_IND:
                         {
-                        	QMI_WDA_SET_LOOPBACK_CONFIG_IND_MSG SetLoopBackInd;
+                            QMI_WDA_SET_LOOPBACK_CONFIG_IND_MSG SetLoopBackInd;
                         	if (read(fd, &SetLoopBackInd, sizeof(SetLoopBackInd)) == sizeof(SetLoopBackInd)) {
                             	profile->loopback_state = SetLoopBackInd.loopback_state.TLVVaule;
                             	profile->replication_factor = le32_to_cpu(SetLoopBackInd.replication_factor.TLVVaule);
                             	dbg_time("SetLoopBackInd: loopback_state=%d, replication_factor=%u",
                                 	profile->loopback_state, profile->replication_factor);
-                            	if (profile->loopback_state)
-                                	send_signo_to_main(SIG_EVENT_START);
+                                    if (profile->loopback_state)
+                                        send_signo_to_main(SIG_EVENT_START);
                             }
                         }
                     	break;
@@ -671,10 +876,20 @@ __main_quit:
         dbg_time("%s Error joining to listener thread (%s)", __func__, strerror(errno));
     }
 
+#ifdef USE_IPC_MSG_STATUS_IND
+    if (gQcmStatusThreadID && pthread_join(gQcmStatusThreadID, NULL)) {
+        dbg_time("%s Error joining to gQcmStatusThreadID (%s)", __func__, strerror(errno));
+    }
+#endif
+
     close(signal_control_fd[0]);
     close(signal_control_fd[1]);
     close(qmidevice_control_fd[0]);
     close(qmidevice_control_fd[1]);
+#ifdef USE_IPC_MSG_STATUS_IND
+    close(qcm_status_indication_fd[0]);
+    close(qcm_status_indication_fd[1]);
+#endif
     dbg_time("%s exit", __func__);
 
     return 0;
@@ -695,14 +910,26 @@ static int quectel_CM(PROFILE_T *profile)
     else if (mhidevice_detect(qmichannel, usbnet_adapter, profile)) {
         profile->hardware_interface = HARDWARE_PCIE;
     }
-	else if (atdevice_detect(qmichannel, usbnet_adapter, profile)) {
+    else if (atdevice_detect(qmichannel, usbnet_adapter, profile)) {
         profile->hardware_interface = HARDWARE_PCIE;
     }
 #ifdef CONFIG_QRTR
-    else if (1) {
-        strcpy(qmichannel, "qrtr");
+    else if (!access("/sys/class/net/rmnet_mhi0", F_OK)) {
         strcpy(usbnet_adapter, "rmnet_mhi0");
         profile->hardware_interface = HARDWARE_PCIE;
+        strcpy(qmichannel, "qrtr");
+        profile->software_interface = SOFTWARE_QRTR;
+    }
+    else if (!access("/sys/class/net/rmnet_usb0", F_OK)) {
+        strcpy(usbnet_adapter, "rmnet_usb0");
+        profile->hardware_interface = HARDWARE_USB;
+        strcpy(qmichannel, "qrtr");
+        profile->software_interface = SOFTWARE_QRTR;
+    }
+    else if (!access("/sys/class/net/rmnet_ipa0", F_OK)) {
+        strcpy(usbnet_adapter, "rmnet_ipa0");
+        profile->hardware_interface = HARDWARE_IPA;
+        strcpy(qmichannel, "qrtr");
         profile->software_interface = SOFTWARE_QRTR;
     }
 #endif
@@ -721,7 +948,7 @@ static int quectel_CM(PROFILE_T *profile)
     if (profile->hardware_interface == HARDWARE_USB) {
         profile->software_interface = get_driver_type(profile);
     }
-  
+
     ql_qmap_mode_detect(profile);
 
     if (profile->software_interface == SOFTWARE_MBIM) {
@@ -772,7 +999,7 @@ error:
 
 static int parse_user_input(int argc, char **argv, PROFILE_T *profile) {
     int opt = 1;
-
+    int apn_name_or_type;
     profile->pdp = CONFIG_DEFAULT_PDP;
     profile->profile_index = CONFIG_DEFAULT_PDP;
 
@@ -788,7 +1015,7 @@ static int parse_user_input(int argc, char **argv, PROFILE_T *profile) {
         switch (argv[opt++][1])
         {
             case 's':
-                profile->apn = profile->user = profile->password = "";
+                profile->apn = profile->user = profile->pd = "";
                 if (has_more_argv()) {
                     profile->apn = argv[opt++];
                 }
@@ -796,8 +1023,8 @@ static int parse_user_input(int argc, char **argv, PROFILE_T *profile) {
                     profile->user = argv[opt++];
                 }
                 if (has_more_argv()) {
-                    profile->password = argv[opt++];
-                    if (profile->password && profile->password[0])
+                    profile->pd = argv[opt++];
+                    if (profile->pd && profile->pd[0])
                         profile->auth = 2; //default chap, customers may miss auth
                 }
                 if (has_more_argv()) {
@@ -902,7 +1129,21 @@ static int parse_user_input(int argc, char **argv, PROFILE_T *profile) {
                     profile->kill_pdp = argv[opt++][0] - '0';
                 }
                 break;
-            
+
+            case 'a':
+                if (has_more_argv()) {
+                    apn_name_or_type = argv[opt++][0] - '0';
+                    if(apn_name_or_type == 1)
+                    profile->bring_up_by_apn_name = apn_name_or_type;
+                    else if(apn_name_or_type == 2) 
+                    profile->bring_up_by_apn_type = apn_name_or_type;   
+                }
+                break;
+            case 'y':
+                if (has_more_argv()) {
+                    profile->apn_type = argv[opt++][0] - '0';
+                }
+                break;            
             default:
                 return usage(argv[0]);
             break;
@@ -921,7 +1162,7 @@ int main(int argc, char *argv[])
     int ret;
     PROFILE_T *ctx = &s_profile;
 
-    dbg_time("QConnectManager_Linux_V1.6.5");
+    dbg_time("QConnectManager_Linux_V1.6.8");
 
     ret = parse_user_input(argc, argv, ctx);
     if (!ret)
